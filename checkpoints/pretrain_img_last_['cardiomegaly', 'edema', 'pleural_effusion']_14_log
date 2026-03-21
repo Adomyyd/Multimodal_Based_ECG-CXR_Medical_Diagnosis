@@ -1,0 +1,14 @@
+Classification Report of epoch 16:
+                  precision    recall  f1-score   support
+
+    cardiomegaly       0.56      0.25      0.35      1217
+           edema       0.62      0.37      0.46       986
+pleural_effusion       0.67      0.40      0.50      1184
+
+       micro avg       0.62      0.34      0.44      3387
+       macro avg       0.62      0.34      0.44      3387
+    weighted avg       0.62      0.34      0.44      3387
+     samples avg       0.07      0.07      0.07      3387
+
+[03:52:05] ep 016 | trn loss: 0.1829 | val loss: 0.1944 | val auroc: 0.87, 0.92,  
+           0.91 | val auprc: 0.44, 0.53, 0.58 | time: 37.74 min  
