@@ -1,8 +1,0 @@
-{
-  "env": {
-    "ANTHROPIC_AUTH_TOKEN": "sk-eqoqeCS2v0ZpY2jLUqmQX16tp9eHol5nWlrlFPW8ghbtljiM",
-    "ANTHROPIC_BASE_URL": "https://www.codexapis.com",
-    "CLAUDE_CODE_EFFORT_LEVEL": "max"
-  },
-  "includeCoAuthoredBy": false
-}
