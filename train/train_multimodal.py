@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import models, transforms
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler, Subset
 import os
 import numpy as np
 import logging
@@ -13,6 +13,7 @@ import hydra
 from omegaconf import DictConfig
 import mlflow
 import time
+import sys
 # 1. 获取当前文件的绝对路径
 current_file_path = os.path.abspath(__file__)
 # 2. 获取当前文件所在目录（dir_A）
@@ -21,12 +22,12 @@ current_dir = os.path.dirname(current_file_path)
 parent_dir = os.path.dirname(current_dir)
 # 4. 将上级目录添加到Python的搜索路径中
 sys.path.append(parent_dir)
-from src.models.cromotex import get_cromotex
-from src.models.ahnp_loss import AHNPLoss
-import src.utils.metrics as metrics
-import src.utils.utils as utils
-from src.utils.utils import lr_linear_rise_cosine_decay as lr_sched
-from src.utils.datasets import CXR_ECG_MatchedDataset
+from src.cromotex.models.cromotex import get_cromotex
+from src.cromotex.models.ahnp_loss import AHNPLoss
+import src.cromotex.utils.metrics as metrics
+import src.cromotex.utils.utils as utils
+from src.cromotex.utils.utils import lr_linear_rise_cosine_decay as lr_sched
+from src.cromotex.utils.datasets import CXR_ECG_MatchedDataset
 
 if not torch.cuda.is_available():
     raise RuntimeError("CUDA not available")
@@ -119,7 +120,7 @@ def evaluate(cfg, model, dataloader, criterion, epoch, device):
     accuracy = correct_predictions / total_samples
     loss_epoch = running_loss / len(dataloader)
 
-    all_labels = torch.cat(all_labels, dim=0).unsqueeze(1)
+    all_labels = torch.cat(all_labels, dim=0)
     all_preds = torch.cat(all_preds, dim=0)
     all_pred_probs = torch.cat(all_pred_probs, dim=0)
 
@@ -132,13 +133,15 @@ def evaluate(cfg, model, dataloader, criterion, epoch, device):
     val_info['auroc'] = auroc_scores
     val_info['auprc'] = auprc_scores
 
-    mlflow.log_metric("loss_val", loss_epoch, step=epoch)    
-    mlflow.log_metric(
-        f"auroc", auroc_scores[0], step=epoch
-    )
-    mlflow.log_metric(
-        f"prauc", auprc_scores[0], step=epoch
-    )
+    mlflow.log_metric("loss_val", loss_epoch, step=epoch)
+    mlflow.log_metric("accuracy_val", accuracy, step=epoch)    
+    for label_idx in range(all_labels.shape[1]):
+        mlflow.log_metric(
+            f"auroc_val_{label_idx}", auroc_scores[label_idx], step=epoch
+        )
+        mlflow.log_metric(
+            f"auprc_val_{label_idx}", auprc_scores[label_idx], step=epoch
+        )
     return val_info
 
 @hydra.main(
@@ -198,42 +201,48 @@ def main(cfg: DictConfig) -> None:
 
     train_data = CXR_ECG_MatchedDataset(
         cfg,
-        'datasets/processed/train_matched.h5',
+        'processed/train_matched.h5',
         img_augs_train, ts_augmentor
     )
 
     val_data = CXR_ECG_MatchedDataset(
         cfg,
-        'datasets/processed/val_matched.h5',
+        'processed/val_matched.h5',
         img_augs_val, None
     )
 
     train_labels = train_data.get_labels()
-    pos_ratio = 0.25
-    neg_ratio = 1 - pos_ratio
-    class_weights = {0: 1.0 / neg_ratio, 1: 1.0 / pos_ratio}
 
-    sample_weights = torch.tensor(
-        [class_weights[label.item()] for label in train_labels]
-    )
+    subnum = None
+    if subnum is not None:
+        train_data = Subset(train_data, range(subnum))
+        val_data = Subset(val_data, range(subnum))
+
+    # pos_ratio = 0.25
+    # neg_ratio = 1 - pos_ratio
+    # class_weights = {0: 1.0 / neg_ratio, 1: 1.0 / pos_ratio}
+
+    # sample_weights = torch.tensor(
+    #     [class_weights[label.item()] for label in train_labels]
+    # )
     
-    generator = torch.Generator().manual_seed(cfg.cromotex_train.seed)
-    sampler = WeightedRandomSampler(
-        weights=sample_weights, num_samples=len(train_labels),
-        replacement=True, generator=generator
-    )
+    # generator = torch.Generator().manual_seed(cfg.cromotex_train.seed)
+    # sampler = WeightedRandomSampler(
+    #     weights=sample_weights, num_samples=len(train_labels),
+    #     replacement=True, generator=generator
+    # )
 
-    def seed_worker(worker_id):
-        np.random.seed(cfg.cromotex_train.seed + worker_id)
-        torch.manual_seed(cfg.cromotex_train.seed + worker_id)
+    # def seed_worker(worker_id):
+    #     np.random.seed(cfg.cromotex_train.seed + worker_id)
+    #     torch.manual_seed(cfg.cromotex_train.seed + worker_id)
 
     train_dataloader = DataLoader(
         train_data,
         batch_size=cfg.cromotex_train.batch_size,
-        sampler=sampler,
-        # shuffle=True,
+        sampler=None,
+        shuffle=True,
         num_workers=cfg.cromotex_train.num_dataloader_workers,
-        worker_init_fn=seed_worker
+        #worker_init_fn=seed_worker
     )
     
     val_dataloader = DataLoader(
@@ -242,6 +251,8 @@ def main(cfg: DictConfig) -> None:
         shuffle=False,
         num_workers=cfg.cromotex_train.num_dataloader_workers
     )
+    logger.info(f"Train dataset size: {len(train_data)}")
+    logger.info(f"Val dataset size: {len(val_data)}")
 
     criterion = AHNPLoss(cfg)
 
@@ -252,6 +263,7 @@ def main(cfg: DictConfig) -> None:
         else:
             for param in model.image_encoder.parameters():
                 param.requires_grad = False
+        print("Freezing image encoder")
 
     if isinstance(model, torch.nn.DataParallel):
         optimizer = model.module.get_optimizer(cfg, model, criterion)
@@ -289,9 +301,9 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"mlflow run name: [bold red]{current_run_name}")
     mlflow.log_params(utils.format_cfg(cfg))
 
-    best_val_loss = float('inf')
-    best_auroc = 0.0
-    best_prauc = 0.0
+    # best_val_loss = float('inf')
+    # best_auroc = 0.0
+    # best_prauc = 0.0
     train_infos = []
     val_infos = []
     for epoch in range(start_epoch, start_epoch + cfg.cromotex_train.num_epochs):
@@ -323,45 +335,45 @@ def main(cfg: DictConfig) -> None:
         logger.info(utils.log_epoch_metrics(train_info, val_info, epoch_time))
         
         run_name = mlflow.active_run().data.tags.get('mlflow.runName')
-        # Save best val_loss checkpoint
-        if val_info['loss'] < best_val_loss:
-            best_val_loss = val_info['loss']
-            if cfg.cromotex_train.save_ckpt:
-                utils.save_checkpoint(
-                    f'{MODEL_NAME}_best_loss_{cfg.pathology}_{run_name}.pth',
-                    model,
-                    optimizer,
-                    epoch,
-                    current_run_id
-                )
-        if val_info['auroc'][list(val_info['auroc'].keys())[0]] > best_auroc:
-            best_auroc = val_info['auroc'][list(val_info['auroc'].keys())[0]]
-            if cfg.cromotex_train.save_ckpt:
-                utils.save_checkpoint(
-                    f'{MODEL_NAME}_best_auroc_{cfg.pathology}_{run_name}.pth',
-                    model,
-                    optimizer,
-                    epoch,
-                    current_run_id
-                )
-        if val_info['auprc'][list(val_info['auprc'].keys())[0]] > best_prauc:
-            best_prauc = val_info['auprc'][list(val_info['auprc'].keys())[0]]
-            if cfg.cromotex_train.save_ckpt:
-                utils.save_checkpoint(
-                    f'{MODEL_NAME}_best_prauc_{cfg.pathology}_{run_name}.pth',
-                    model,
-                    optimizer,
-                    epoch,
-                    current_run_id
-                )
-        mlflow.log_metric("loss_best_val", best_val_loss, step=epoch)
-        mlflow.log_metric("auroc_best_val", best_auroc, step=epoch)
-        mlflow.log_metric("prauc_best_val", best_prauc, step=epoch)
+        # # Save best val_loss checkpoint
+        # if val_info['loss'] < best_val_loss:
+        #     best_val_loss = val_info['loss']
+        #     if cfg.cromotex_train.save_ckpt:
+        #         utils.save_checkpoint(
+        #             f'{MODEL_NAME}_best_loss_{cfg.pathology}_{run_name}.pth',
+        #             model,
+        #             optimizer,
+        #             epoch,
+        #             current_run_id
+        #         )
+        # if val_info['auroc'][list(val_info['auroc'].keys())[0]] > best_auroc:
+        #     best_auroc = val_info['auroc'][list(val_info['auroc'].keys())[0]]
+        #     if cfg.cromotex_train.save_ckpt:
+        #         utils.save_checkpoint(
+        #             f'{MODEL_NAME}_best_auroc_{cfg.pathology}_{run_name}.pth',
+        #             model,
+        #             optimizer,
+        #             epoch,
+        #             current_run_id
+        #         )
+        # if val_info['auprc'][list(val_info['auprc'].keys())[0]] > best_prauc:
+        #     best_prauc = val_info['auprc'][list(val_info['auprc'].keys())[0]]
+        #     if cfg.cromotex_train.save_ckpt:
+        #         utils.save_checkpoint(
+        #             f'{MODEL_NAME}_best_prauc_{cfg.pathology}_{run_name}.pth',
+        #             model,
+        #             optimizer,
+        #             epoch,
+        #             current_run_id
+        #         )
+        # mlflow.log_metric("loss_best_val", best_val_loss, step=epoch)
+        # mlflow.log_metric("auroc_best_val", best_auroc, step=epoch)
+        # mlflow.log_metric("prauc_best_val", best_prauc, step=epoch)
 
         # Save last checkpoint    
         if cfg.cromotex_train.save_ckpt:
             utils.save_checkpoint(
-                f'{MODEL_NAME}_last_{cfg.pathology}_{run_name}.pth',
+                f'{MODEL_NAME}_last_{cfg.pathology}_{run_name}_{epoch}.pth',
                 model,
                 optimizer,
                 epoch,

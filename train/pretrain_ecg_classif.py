@@ -32,12 +32,17 @@ current_dir = os.path.dirname(current_file_path)
 parent_dir = os.path.dirname(current_dir)
 # 4. 将上级目录添加到Python的搜索路径中
 sys.path.append(parent_dir)
-from src.cromotex.models.cromotex import CroMoTEXFinetune
+from src.cromotex.models.timeseries_encoder import ECGTimeseriesEncoder
 import src.cromotex.utils.metrics as metrics
 import src.cromotex.utils.utils as utils
 from src.cromotex.utils.utils import lr_linear_rise_cosine_decay as lr_sched
 from src.cromotex.utils.datasets import CXR_ECG_MatchedDataset
 from src.cromotex.utils.balanced_sampler import create_balanced_sampler
+
+import warnings
+
+# 过滤掉特定的 UserWarning
+warnings.filterwarnings("ignore", message="To copy construct from a tensor")
 
 if not torch.cuda.is_available():
     raise RuntimeError("CUDA not available")
@@ -54,12 +59,10 @@ def train_one_epoch(
     model.train()
     running_loss = 0.0
 
-    lr = lr_sched(cfg.finetune.optim, epoch)
+    lr = lr_sched(cfg.pretrain_ecg_classif.optim, epoch)
     
-    if isinstance(model, torch.nn.DataParallel):
-        optimizer = model.module.set_lr(cfg, optimizer, lr)
-    else:
-        optimizer = model.set_lr(cfg, optimizer, lr)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
 
     optimizer.zero_grad()
 
@@ -69,25 +72,25 @@ def train_one_epoch(
         #     break #testing
         ecg, labels = ecg.to(device), labels.to(device)
         labels = labels.float()
-        # ts_logits = model(None, ecg, True) #BIOT, ViT/ECCL
-        ts_logits,_ = model(ecg) #Cromolts
+        # embeds, logits = model(ecg)
+        _, ts_logits = model(ecg)
         loss = criterion(ts_logits, labels)
-        loss = loss / cfg.finetune.optim.grad_accum_steps
+        loss = loss / cfg.pretrain_ecg_classif.optim.grad_accum_steps
 
         loss.backward()
 
-        if cfg.finetune.optim.grad_clip > 0.0:
-            grad_clip = cfg.finetune.optim.grad_clip
-            if cfg.finetune.data_parallel:
+        if cfg.pretrain_ecg_classif.optim.grad_clip > 0.0:
+            grad_clip = cfg.pretrain_ecg_classif.optim.grad_clip
+            if cfg.pretrain_ecg_classif.data_parallel:
                 torch.nn.utils.clip_grad_norm_(
                     model.module.parameters(), grad_clip
                 )
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-        running_loss += loss.item() * cfg.finetune.optim.grad_accum_steps
+        running_loss += loss.item() * cfg.pretrain_ecg_classif.optim.grad_accum_steps
 
-        if (idx + 1) % cfg.finetune.optim.grad_accum_steps == 0:
+        if (idx + 1) % cfg.pretrain_ecg_classif.optim.grad_accum_steps == 0:
             optimizer.step()
             optimizer.zero_grad()
             mlflow.log_metric(
@@ -123,8 +126,8 @@ def evaluate(cfg, model, dataloader, criterion, epoch, device):
             labels = labels.to(device)
             labels = labels.float()
 
-            # ts_logits = model(None, ecg, True) #BIOT
-            ts_logits,_ = model(ecg) #Cromolts
+            # embeds, logits = model(ecg)
+            _, ts_logits = model(ecg)
 
             loss = criterion(ts_logits, labels)
             running_loss += loss.item()
@@ -187,25 +190,25 @@ def evaluate(cfg, model, dataloader, criterion, epoch, device):
 )
 def main(cfg: DictConfig) -> None:
 
-    np.random.seed(cfg.finetune.seed)
-    torch.manual_seed(cfg.finetune.seed)
-    torch.cuda.manual_seed(cfg.finetune.seed)
-    torch.cuda.manual_seed_all(cfg.finetune.seed)
+    np.random.seed(cfg.pretrain_ecg_classif.seed)
+    torch.manual_seed(cfg.pretrain_ecg_classif.seed)
+    torch.cuda.manual_seed(cfg.pretrain_ecg_classif.seed)
+    torch.cuda.manual_seed_all(cfg.pretrain_ecg_classif.seed)
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True)
 
-    if cfg.finetune.data_parallel:
+    if cfg.pretrain_ecg_classif.data_parallel:
         os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
         device = torch.device("cuda")
     else:
-        device = torch.device("cuda", cfg.finetune.gpu_id)
+        device = torch.device("cuda", cfg.pretrain_ecg_classif.gpu_id)
 
     mlflow.set_tracking_uri(hydra.utils.to_absolute_path('mlruns'))
-    mlflow.set_experiment(cfg.finetune.mlflow_expt_name)
+    mlflow.set_experiment(cfg.pretrain_ecg_classif.mlflow_expt_name)
     experiment = mlflow.get_experiment_by_name(
-        cfg.finetune.mlflow_expt_name
+        cfg.pretrain_ecg_classif.mlflow_expt_name
     )
 
     logger = logging.getLogger("mlflow")
@@ -224,39 +227,24 @@ def main(cfg: DictConfig) -> None:
     rich_handler.setFormatter(formatter)
     logger.addHandler(rich_handler)
     
-    model = CroMoTEXFinetune(cfg, logger)
+    model = ECGTimeseriesEncoder(cfg)
 
-    # filepath = os.path.join(
-    # hydra.utils.to_absolute_path('checkpoints'),
-    #     'cromotex_finetuned_originECG_[\'cardiomegaly\', \'edema\', \'pleural_effusion\'].pth'
-    # )
-
-    # checkpoint = torch.load(filepath, map_location='cpu')
-    # encoder_state_dict = checkpoint['model_state_dict']
-    # model.load_state_dict(encoder_state_dict, strict=True)
-
-    if cfg.finetune.data_parallel:
+    if cfg.pretrain_ecg_classif.data_parallel:
         model = torch.nn.DataParallel(model)
     model.to(device)
 
     m = model.module if isinstance(model, torch.nn.DataParallel) else model
-    img_augs_train, img_augs_val, ts_augmentor = m.get_augmentations()
+    
+    from src.cromotex.utils.ts_augmentations import ECGAugmentor
+    ts_augmentor = ECGAugmentor()
     
     for param in m.parameters():
-        #Freeze entire model
-        param.requires_grad = False
-    if not cfg.finetune.freeze_backbone:
-        for param in m.cromotex.timeseries_encoder.parameters():
-        # for param in m.timeseries_encoder.parameters():
-            #Only un-freeze the ts encoder
-            try:
-                param.requires_grad = True
-            except:
-                pass
-    for param in m.classif_head.parameters():
         param.requires_grad = True
 
-    optimizer = m.get_optimizer(cfg, model)
+    optimizer = torch.optim.AdamW([
+        {'params': m.timeseries_encoder.parameters(), 'lr': cfg.pretrain_ecg_classif.optim.lr_peak, 'name': 'timeseries_encoder'},
+        {'params': m.classif_head.parameters(), 'lr': cfg.pretrain_ecg_classif.optim.lr_peak, 'name': 'classif_head'}
+    ], weight_decay=cfg.pretrain_ecg_classif.optim.weight_decay)
 
     train_data = CXR_ECG_MatchedDataset(
         cfg,
@@ -272,9 +260,9 @@ def main(cfg: DictConfig) -> None:
 
     train_labels = train_data.get_labels()
 
-    if cfg.finetune.weighted_sampling is True:
+    if cfg.pretrain_ecg_classif.weighted_sampling is True:
         train_sampler = create_balanced_sampler(
-            cfg.finetune, train_labels, pos_neg_ratio=cfg.finetune.pos_neg_ratio
+            cfg.pretrain_ecg_classif, train_labels, pos_neg_ratio=cfg.pretrain_ecg_classif.pos_neg_ratio
         )
         shuffle = False
     else:
@@ -283,25 +271,27 @@ def main(cfg: DictConfig) -> None:
     
     train_dataloader = DataLoader(
         train_data,
-        batch_size=cfg.finetune.batch_size,
+        batch_size=cfg.pretrain_ecg_classif.batch_size,
         sampler=train_sampler,
         shuffle=shuffle,
-        num_workers=cfg.finetune.num_dataloader_workers
+        num_workers=cfg.pretrain_ecg_classif.num_dataloader_workers,
+        pin_memory=True
     )
     
     val_dataloader = DataLoader(
         val_data,
-        batch_size=cfg.finetune.batch_size,
+        batch_size=cfg.pretrain_ecg_classif.batch_size,
         shuffle=False,
-        num_workers=cfg.finetune.num_dataloader_workers
+        num_workers=cfg.pretrain_ecg_classif.num_dataloader_workers,
+        pin_memory=True
     )
 
     criterion = nn.BCEWithLogitsLoss()
 
     start_epoch = 0
-    if cfg.finetune.resume_from_last_ckpt:
+    if cfg.pretrain_ecg_classif.resume_from_last_ckpt:
         checkpoint_data = utils.load_train_checkpoint(
-            f'cromotex_finetuned_EnhancedECG_{cfg.pathology}_weighted_0.3.pth', model, optimizer
+            cfg.pretrain_ecg_classif.ckpt_filename, model, optimizer
         )
         model, optimizer, last_epoch, mlflow_run_id = checkpoint_data
         start_epoch = last_epoch + 1
@@ -333,7 +323,7 @@ def main(cfg: DictConfig) -> None:
     # best_prauc = 0.0
     train_infos = []
     val_infos = []
-    for epoch in range(start_epoch, start_epoch + cfg.finetune.num_epochs):
+    for epoch in range(start_epoch, start_epoch + cfg.pretrain_ecg_classif.num_epochs):
         start_time = time.time()
 
         train_info = train_one_epoch(
@@ -364,8 +354,8 @@ def main(cfg: DictConfig) -> None:
         # # Save best checkpoint
         # if val_info['loss'] < best_val_loss:
         #     best_val_loss = val_info['loss']
-        #     if cfg.finetune.save_ckpt:
-        #         fname = f'cromotex_finetuned_originECG_best_loss_{cfg.pathology}_weighted_{cfg.finetune.pos_neg_ratio}.pth'
+        #     if cfg.pretrain_ecg_classif.save_ckpt:
+        #         fname = f'cromotex_finetuned_originECG_best_loss_{cfg.pathology}_weighted_{cfg.pretrain_ecg_classif.pos_neg_ratio}.pth'
         #         utils.save_checkpoint(
         #             fname,
         #             model,
@@ -375,7 +365,7 @@ def main(cfg: DictConfig) -> None:
         #         )
         # if val_info['auroc'][list(val_info['auroc'].keys())[0]] > best_auroc:
         #     best_auroc = val_info['auroc'][list(val_info['auroc'].keys())[0]]
-        #     if cfg.finetune.save_ckpt:
+        #     if cfg.pretrain_ecg_classif.save_ckpt:
         #         fname = f'cromotex_finetuned_best_auroc_{cfg.pathology}'
         #         fname += f'_{ckpt_run_name}.pth'
         #         utils.save_checkpoint(
@@ -387,7 +377,7 @@ def main(cfg: DictConfig) -> None:
         #         )
         # if val_info['auprc'][list(val_info['auprc'].keys())[0]] > best_prauc:
         #     best_prauc = val_info['auprc'][list(val_info['auprc'].keys())[0]]
-        #     if cfg.finetune.save_ckpt:
+        #     if cfg.pretrain_ecg_classif.save_ckpt:
         #         fname = f'cromolts_finetuned_best_prauc_{cfg.pathology}'
         #         fname += f'_{ckpt_run_name}.pth'
         #         utils.save_checkpoint(
@@ -399,7 +389,7 @@ def main(cfg: DictConfig) -> None:
         #         )
         # if val_info['f1'] > best_f1:
         #     best_f1 = val_info['f1']
-        #     if cfg.finetune.save_ckpt:
+        #     if cfg.pretrain_ecg_classif.save_ckpt:
         #         fname = f'cromolts_finetuned_best_f1_{cfg.pathology}'
         #         fname += f'_{ckpt_run_name}.pth'
         #         utils.save_checkpoint(
@@ -410,8 +400,8 @@ def main(cfg: DictConfig) -> None:
         #             current_run_id
         #         )
         # Save last checkpoint    
-        if cfg.finetune.save_ckpt:
-            fname = f'cromotex_finetuned_EnhancedECG_{cfg.pathology}_weighted_{cfg.finetune.pos_neg_ratio}_{epoch}.pth'
+        if cfg.pretrain_ecg_classif.save_ckpt:
+            fname = f'pretrain_ecg_classif_classif_{cfg.pathology}_{epoch}.pth'
             utils.save_checkpoint(
                 fname,
                 model,
@@ -419,7 +409,7 @@ def main(cfg: DictConfig) -> None:
                 epoch,
                 current_run_id
             )
-        if cfg.finetune.early_stop:
+        if cfg.pretrain_ecg_classif.early_stop:
             if utils.early_stop(
                 train_infos, val_infos, patience=3
             ):

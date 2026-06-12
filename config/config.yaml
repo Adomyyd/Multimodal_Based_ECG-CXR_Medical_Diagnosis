@@ -2,17 +2,19 @@ defaults:
   - cromotex: cromotex_patch_transformer
 
 pathology: ['cardiomegaly', 'edema', 'pleural_effusion']
+img_pth_name: ['last', 14]
+ecg_pth_name: ['last', 40]
 
 finetune:
   seed: 42
   mlflow_expt_name: 'cromotex_finetune'
   mlflow_run_notes: 'notes for mlflow'
-  gpu_id: 0
-  ckpt_filename: '' # 'filename.pth' or '' for from-scratch
+  gpu_id: 3
+  ckpt_filename: 'agreeable-gnat-409_12.pth' # 'filename.pth' or '' for from-scratch
   num_epochs: 50
   batch_size: 256
   save_ckpt: True
-  early_stop: True
+  early_stop: False
   data_parallel: False
   num_dataloader_workers: 4
   loss: 'bce' # bce only 
@@ -20,6 +22,9 @@ finetune:
   focal_gamma: 2.0
   focal_alpha: 0.25
   focal_pos_weight: 4.0
+  weighted_sampling: True
+  pos_neg_ratio: 0.3
+  resume_from_last_ckpt: False
 
   optim:
     grad_clip: 2.5
@@ -50,7 +55,7 @@ cromotex_train:
 
   num_dataloader_workers: 4
   num_epochs: 50
-  batch_size: 256
+  batch_size: 64
 
   optim:
     grad_clip: 2.5
@@ -118,3 +123,72 @@ pretrain_img:
   save_ckpt: True
   early_stop: True
   early_stop_patience_epochs: 4
+
+CLKD_train:
+  seed: 42
+  mlflow_expt_name: 'CLKD_train'
+  mlflow_run_notes: 'mlflow notes'
+  gpu_id: 3
+  data_parallel: False
+  resume_from_last_ckpt: True
+  save_ckpt: True
+  early_stop: True
+  img_encoder_freeze: True
+  temperature: 0.01
+  use_NCKD: True
+  use_krc: True
+  use_DGSF: False
+  
+  lambda_cross_contrast: 1.0
+  lambda_uni_contrast: 0.0
+  lambda_classif: 0.0
+
+  hard_neg_weights: 'topk' # 'linear' or 'topk' or 'exp' or 'none' 
+  hard_neg_topk_fraction: 0.1 #fraction of batch size with increased weight
+  hard_neg_alpha: 5.0
+
+  num_dataloader_workers: 2
+  num_epochs: 50
+  batch_size: 64
+
+  loss_AHNP: 0.
+  loss_SMLI: 0.
+  loss_BCE: 1.0
+  loss_KD: 0.1
+
+  optim:
+    grad_clip: 2.0
+    lr_peak: 1e-4
+    proj_linear_lr_scaler: 0.1
+    warmup_epochs: 5
+    decay_epochs: 50
+    weight_decay: 1e-5
+    grad_accum_steps: 1 #1 for no accumulation
+
+pretrain_ecg_classif:
+  seed: 42
+  mlflow_expt_name: 'ecg_classif'
+  mlflow_run_notes: 'notes for mlflow'
+  gpu_id: 0
+  num_epochs: 50
+  batch_size: 256
+  save_ckpt: True
+  early_stop: True
+  data_parallel: False
+  num_dataloader_workers: 4
+  loss: 'bce' # bce only 
+  freeze_backbone: False
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  focal_pos_weight: 4.0
+  weighted_sampling: False
+  pos_neg_ratio: 0.3
+  resume_from_last_ckpt: False
+
+  optim:
+    grad_clip: 2.5
+    lr_peak: 1e-5 #1e-5
+    warmup_epochs: 10
+    decay_epochs: 100
+    weight_decay: 1e-5
+    grad_accum_steps: 1 #1 for no accumulation
