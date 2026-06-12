@@ -251,5 +251,6 @@ python train/train_CLKD.py
 - 论文：[arXiv:2506.19329](https://arxiv.org/abs/2506.19329)
 - 官方代码：[vineetpmoorty/CroMoTEX](https://github.com/vineetpmoorty/CroMoTEX)
 - ECG 编码器参考：[svthapa/MoRE](https://github.com/svthapa/MoRE)、[torchxrayvision](https://github.com/mlmed/torchxrayvision)
+- 有关 CLKD 的理论可参考：CLKD.pdf
 
 > 本仓库为研究复现版本，CLKD（对比学习 + 知识蒸馏）相关模块为在原方法基础上的扩展实现，仅供学术研究使用，不构成任何临床诊断依据。
